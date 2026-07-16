@@ -10,10 +10,40 @@ set(SOURCES
     src/main.cpp
     src/utils/log.cpp
     src/utils/config.cpp
+    src/utils/auth.cpp
+    src/core/inetaddress.cpp
+    src/core/socket.cpp
+    src/core/channel.cpp
+    src/core/eventloop.cpp
+    src/core/buffer.cpp
+    src/core/acceptor.cpp
+    src/core/tcp_connection.cpp
+    src/core/server.cpp
+    src/core/eventloop_thread.cpp
+    src/core/eventloop_thread_pool.cpp
+    src/core/timer_queue.cpp
+    src/core/signal_handler.cpp
+    src/core/ssl_context.cpp
+    src/protocol/websocket.cpp
+    src/service/session_mgr.cpp
+    src/db/database.cpp
+    src/db/migrations.cpp
 )
 
 # ===== 可执行目标 =====
 add_executable(server ${SOURCES})
+
+# ===== 链接 pthread =====
+find_package(Threads REQUIRED)
+target_link_libraries(server PRIVATE Threads::Threads)
+
+# ===== 链接 OpenSSL (SHA1, Base64) =====
+find_package(OpenSSL REQUIRED)
+target_link_libraries(server PRIVATE OpenSSL::Crypto OpenSSL::SSL)
+
+# ===== 链接 SQLite3 =====
+find_package(SQLite3 REQUIRED)
+target_link_libraries(server PRIVATE SQLite::SQLite3)
 
 # ===== 头文件路径 =====
 target_include_directories(server PUBLIC

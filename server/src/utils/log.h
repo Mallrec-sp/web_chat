@@ -57,11 +57,23 @@ private:
     std::thread m_writeThread;
 };
 
-#define LOG_DEBUG(msg) Log::getInstance().logDebug(std::string("[")+__FILE__+":"+\
-                std::to_string(__LINE__)+"]"+msg)
-#define LOG_INFO(msg) Log::getInstance().logInfo(std::string("[")+__FILE__+":"+\
-                std::to_string(__LINE__)+"]"+msg)
-#define LOG_WARNING(msg) Log::getInstance().logWarning(std::string("[")+__FILE__+":"+\
-                std::to_string(__LINE__)+"]"+msg)
-#define LOG_ERROR(msg) Log::getInstance().logError(std::string("[")+__FILE__+":"+\
-                std::to_string(__LINE__)+"]"+msg)
+#define LOG_DEBUG(msg) do { \
+    std::ostringstream _log_ss; _log_ss << msg; \
+    Log::getInstance().logDebug(std::string("[")+__FILE__+":"+\
+                std::to_string(__LINE__)+"]"+_log_ss.str()); \
+} while(0)
+#define LOG_INFO(msg) do { \
+    std::ostringstream _log_ss; _log_ss << msg; \
+    Log::getInstance().logInfo(std::string("[")+__FILE__+":"+\
+                std::to_string(__LINE__)+"]"+_log_ss.str()); \
+} while(0)
+#define LOG_WARNING(msg) do { \
+    std::ostringstream _log_ss; _log_ss << msg; \
+    Log::getInstance().logWarning(std::string("[")+__FILE__+":"+\
+                std::to_string(__LINE__)+"]"+_log_ss.str()); \
+} while(0)
+#define LOG_ERROR(msg) do { \
+    std::ostringstream _log_ss; _log_ss << msg; \
+    Log::getInstance().logError(std::string("[")+__FILE__+":"+\
+                std::to_string(__LINE__)+"]"+_log_ss.str()); \
+} while(0)

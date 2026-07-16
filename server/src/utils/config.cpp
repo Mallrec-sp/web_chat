@@ -23,8 +23,15 @@ Config Config::load(const char* json_path){
     }
   }
   config.workers_ = json.value("workers", config.workers_);
-  if (json.contains("database") && json["database"].contains("path"))    
+  if (json.contains("database") && json["database"].contains("path"))
     config.database_config_.database_path_ = json["database"]["path"];
+
+  if (json.contains("ssl")) {
+    auto& ssl = json["ssl"];
+    config.ssl_config_.enabled_ = ssl.value("enabled", false);
+    config.ssl_config_.cert_path_ = ssl.value("cert_path", config.ssl_config_.cert_path_);
+    config.ssl_config_.key_path_ = ssl.value("key_path", config.ssl_config_.key_path_);
+  }
 
   return config;
 }

@@ -1,0 +1,32 @@
+# Git
+.git/
+.gitignore
+
+# Build artifacts
+server/build/
+server/CMakeFiles/
+server/Makefile
+server/cmake_install.cmake
+server/CMakeCache.txt
+
+# Node
+client/node_modules/
+client/package-lock.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (mounted as volume in Docker)
+server/data/
+
+# Temp
+*.tar.gz
+*.log
+/tmp/

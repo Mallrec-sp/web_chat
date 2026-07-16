@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  netchat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: netchat:latest
+    container_name: netchat
+    ports:
+      - "8080:8080"
+    environment:
+      - NETCHAT_STATIC_DIR=./dist/
+      - NETCHAT_CONFIG_PATH=./config.json
+    volumes:
+      - netchat-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/auth/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  netchat-data:
