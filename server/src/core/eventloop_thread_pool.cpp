@@ -11,7 +11,15 @@ EventLoopThreadPool::EventLoopThreadPool(EventLoop* baseLoop, const std::string&
 }
 
 EventLoopThreadPool::~EventLoopThreadPool() {
-    // EventLoopThread 的析构函数会自动 quit() 并 join 线程
+    stop();
+}
+
+void EventLoopThreadPool::stop() {
+    for (const auto& thread : threads_) thread->requestStop();
+    for (const auto& thread : threads_) thread->join();
+    loops_.clear();
+    threads_.clear();
+    next_ = 0;
 }
 
 void EventLoopThreadPool::start(const ThreadInitCallback& cb) {

@@ -1,0 +1,46 @@
+# 仅应用服务；MySQL 由托管服务或独立主机提供。
+# 使用：docker compose --env-file .env.production -f compose.external.yml run --rm migrate
+#       docker compose --env-file .env.production -f compose.external.yml up -d --build netchat
+x-environment: &environment
+  NETCHAT_DB_HOST: ${NETCHAT_DB_HOST:?请设置独立MySQL地址}
+  NETCHAT_DB_PORT: ${NETCHAT_DB_PORT:-3306}
+  NETCHAT_DB_NAME: ${NETCHAT_DB_NAME:-netchat}
+  NETCHAT_DB_POOL_SIZE: ${NETCHAT_DB_POOL_SIZE:-8}
+  NETCHAT_DB_SSL_MODE: VERIFY_IDENTITY
+  NETCHAT_DB_SSL_CA: /run/mysql-ca.pem
+
+services:
+  migrate:
+    build: .
+    image: netchat:mysql
+    command: ["--migrate"]
+    environment:
+      <<: *environment
+      NETCHAT_DB_USER: ${NETCHAT_MIGRATION_USER:-netchat_migrator}
+      NETCHAT_DB_PASSWORD: ${NETCHAT_MIGRATION_PASSWORD:?请设置迁移密码}
+    volumes:
+      - ${NETCHAT_DB_CA_FILE:?请设置数据库CA文件路径}:/run/mysql-ca.pem:ro
+    restart: "no"
+
+  netchat:
+    build: .
+    image: netchat:mysql
+    ports:
+      - "${NETCHAT_HTTP_BIND:-127.0.0.1}:${NETCHAT_HTTP_PORT:-8081}:8081"
+    environment:
+      <<: *environment
+      NETCHAT_DB_USER: ${NETCHAT_DB_USER:-netchat_app}
+      NETCHAT_DB_PASSWORD: ${NETCHAT_DB_PASSWORD:?请设置应用数据库密码}
+    volumes:
+      - ${NETCHAT_DB_CA_FILE:?请设置数据库CA文件路径}:/run/mysql-ca.pem:ro
+      - uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:8081/api/health"]
+      interval: 15s
+      timeout: 6s
+      retries: 3
+    stop_grace_period: 40s
+    restart: unless-stopped
+
+volumes:
+  uploads:

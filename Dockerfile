@@ -1,69 +1,39 @@
-# ============================================
-# NetChat Docker 化 — 多阶段构建
-# ============================================
-# 使用方式：
-#   docker compose build
-#   docker compose up -d
-# ============================================
-
-# ---- Stage 1: 编译 C++ 后端 ----
-FROM ubuntu:22.04 AS builder
-
-LABEL stage=builder
-
+# MySQL 客户端构建环境；不需要在宿主机安装开发库。
+FROM ubuntu:24.04 AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    cmake \
-    libssl-dev \
-    libsqlite3-dev \
-    ca-certificates \
+    build-essential cmake pkg-config libssl-dev libmysqlclient-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /build
+COPY server/ ./server/
+RUN cmake -S server -B out -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+    && cmake --build out -j2
 
-# 先复制 CMakeLists.txt 和第三方库（利用 Docker 缓存）
-COPY server/CMakeLists.txt server/third_party/ ./server/
-COPY server/third_party/ ./server/third_party/
+# 原生数据库测试镜像，与服务共用同一适配层。
+FROM builder AS db-test
+ENTRYPOINT ["/build/out/database_test"]
 
-# 复制所有源码
-COPY server/src ./server/src
-
-# 编译
-RUN cd server && mkdir -p build && cd build && \
-    cmake .. -DCMAKE_BUILD_TYPE=Release && \
-    make -j$(nproc)
-
-# ---- Stage 2: 运行环境 ----
-FROM ubuntu:22.04 AS runtime
-
-# 安装运行时依赖（OpenSSL、SQLite3）
+FROM ubuntu:24.04 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libssl3 \
-    libsqlite3-0 \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# 创建非 root 用户
-RUN groupadd -r netchat && useradd -r -g netchat -d /app -s /sbin/nologin netchat
-
+    libssl3t64 libmysqlclient21 curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r netchat \
+    && useradd -r -g netchat -d /app -s /usr/sbin/nologin netchat
 WORKDIR /app
-
-# 从构建阶段复制编译好的二进制
-COPY --from=builder /build/server/build/server .
-
-# 复制前端静态文件
-COPY client/dist ./dist/
-
-# 复制配置文件
-COPY server/config.json .
-
-# 创建数据目录
-RUN mkdir -p /app/data && chown -R netchat:netchat /app
-
+COPY --from=builder /build/out/server ./server
+COPY client/dist/ ./dist/
+COPY server/config.json ./config.json
+RUN mkdir -p /app/uploads /app/run && chown -R netchat:netchat /app
 USER netchat
+WORKDIR /app/run
+ENV NETCHAT_CONFIG_PATH=/app/config.json NETCHAT_STATIC_DIR=/app/dist
+EXPOSE 8081
+ENTRYPOINT ["/app/server"]
 
-EXPOSE 8080
+# 协议回归测试专用；测试脚本不能放进 /app/server（二进制文件）目录。
+FROM runtime AS protocol-test
+COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY server/tests/chat-protocol.mjs /app/tests/server/chat-protocol.mjs
+ENTRYPOINT ["node", "/app/tests/server/chat-protocol.mjs"]
 
-# 启动服务器
-CMD ["./server"]
+# 默认 docker build 产物仍然是服务，不携带 Node 或测试脚本。
+FROM runtime AS production

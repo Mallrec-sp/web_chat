@@ -1,26 +1,77 @@
-version: '3.8'
+# 本地开发。线上外部 MySQL 使用 compose.external.yml。
+x-app-environment: &app-environment
+  NETCHAT_DB_HOST: mysql
+  NETCHAT_DB_PORT: "3306"
+  NETCHAT_DB_NAME: netchat
+  NETCHAT_DB_POOL_SIZE: "4"
+  # 开发库使用自动生成证书；线上必须 VERIFY_IDENTITY 并提供可信 CA。
+  NETCHAT_DB_SSL_MODE: REQUIRED
 
 services:
-  netchat:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: netchat:latest
-    container_name: netchat
-    ports:
-      - "8080:8080"
+  mysql:
+    image: mysql:8.4
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_bin
+      - --max-allowed-packet=16777216
+      - --innodb-lock-wait-timeout=5
+      - --require-secure-transport=ON
     environment:
-      - NETCHAT_STATIC_DIR=./dist/
-      - NETCHAT_CONFIG_PATH=./config.json
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请先生成本地.env}
+      MYSQL_DATABASE: netchat
+      NETCHAT_APP_PASSWORD: ${NETCHAT_APP_PASSWORD:?请设置应用密码}
+      NETCHAT_MIGRATION_PASSWORD: ${NETCHAT_MIGRATION_PASSWORD:?请设置迁移密码}
+    ports:
+      - "127.0.0.1:${NETCHAT_MYSQL_PORT:-3306}:3306"
     volumes:
-      - netchat-data:/app/data
-    restart: unless-stopped
+      - mysql-data:/var/lib/mysql
+      - ./docker/mysql/init-users.sh:/docker-entrypoint-initdb.d/10-users.sh:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/auth/login"]
-      interval: 30s
-      timeout: 5s
+      # TCP 登录和查询成功才就绪，避免把初始化期间的临时 socket 服务判为健康。
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$NETCHAT_APP_PASSWORD\" mysql --protocol=tcp --host=127.0.0.1 --ssl-mode=REQUIRED --user=netchat_app --database=netchat --execute='SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    image: netchat:mysql
+    command: ["--migrate"]
+    environment:
+      <<: *app-environment
+      NETCHAT_DB_USER: netchat_migrator
+      NETCHAT_DB_PASSWORD: ${NETCHAT_MIGRATION_PASSWORD:?请设置迁移密码}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
+  netchat:
+    build: .
+    image: netchat:mysql
+    ports:
+      - "${NETCHAT_HTTP_PORT:-8081}:8081"
+    environment:
+      <<: *app-environment
+      NETCHAT_DB_USER: netchat_app
+      NETCHAT_DB_PASSWORD: ${NETCHAT_APP_PASSWORD:?请设置应用密码}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:8081/api/health"]
+      interval: 15s
+      timeout: 6s
       retries: 3
-      start_period: 5s
+    stop_grace_period: 40s
+    restart: unless-stopped
 
 volumes:
-  netchat-data:
+  mysql-data:
+  uploads:

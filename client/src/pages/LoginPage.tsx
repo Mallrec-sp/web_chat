@@ -5,7 +5,7 @@ import { useChatStore } from '../store/chatStore';
 export default function LoginPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState(() => sessionStorage.getItem('netchat_login_notice') || '');
   const [loading, setLoading] = useState(false);
   const login = useChatStore(s => s.login);
   const navigate = useNavigate();
@@ -19,6 +19,7 @@ export default function LoginPage() {
       if (err) {
         setError(err);
       } else {
+        sessionStorage.removeItem('netchat_login_notice');
         navigate('/chat');
       }
     } catch (e: any) {

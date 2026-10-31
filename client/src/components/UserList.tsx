@@ -62,10 +62,10 @@ export default function UserList() {
                 <div className="user-avatar">{getInitial(user.username)}</div>
                 <div className="user-info">
                   <div className="name">{user.username}</div>
-                  <div className="status">在线</div>
+                  <div className="status">{user.online ? '在线' : '离线'}</div>
                 </div>
                 {unread > 0 && <div className="unread-badge">{unread}</div>}
-                <div className="online-dot" />
+                {user.online && <div className="online-dot" />}
               </div>
             );
           })}

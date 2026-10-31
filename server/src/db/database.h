@@ -1,86 +1,100 @@
 #ifndef NETCHAT_DATABASE_H
 #define NETCHAT_DATABASE_H
 
-#include <string>
-#include <vector>
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
 #include <memory>
-#include <functional>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
 
-struct sqlite3;
-struct sqlite3_stmt;
+struct DatabaseOptions {
+    std::string host = "127.0.0.1";
+    unsigned port = 3306;
+    std::string database = "netchat";
+    std::string user = "netchat_app";
+    std::string password;
+    size_t poolSize = 4;
+    unsigned connectTimeoutSec = 5;
+    unsigned readTimeoutSec = 5;
+    unsigned writeTimeoutSec = 5;
+    unsigned acquireTimeoutMs = 3000;
+    std::string sslMode = "VERIFY_IDENTITY";
+    std::string sslCa;
+};
 
-/**
- * Database — SQLite3 数据库封装。
- *
- * 职责：
- *   1. 打开/关闭 SQLite3 数据库
- *   2. 执行 SQL 语句（DDL/DML）
- *   3. 创建预编译语句（Statement）
- *   4. 事务管理
- *
- * 设计要点：
- *   - 打开时自动启用 WAL 模式（读写并发不阻塞）
- *   - 外键约束启用
- *   - RAII 管理 sqlite3 连接生命周期
- *
- * 讲解点：WAL 模式 vs 传统回滚日志
- *   传统模式下，读操作会阻塞写操作，写操作也会阻塞读操作。
- *   WAL（Write-Ahead Logging）模式下，读操作从不阻塞写操作，
- *   写操作也不阻塞读操作。这对聊天服务器非常重要——
- *   用户发消息（写）的同时，消息历史查询（读）可以正常进行。
- */
+// 错误消息刻意排除服务端错误原文、SQL 和绑定值，避免泄露敏感信息。
+class DbError : public std::runtime_error {
+public:
+    DbError(int code, std::string sqlState, const std::string& message);
+    int code() const noexcept { return code_; }
+    const std::string& sqlState() const noexcept { return sqlState_; }
+private:
+    int code_;
+    std::string sqlState_;
+};
+
+using DbValue = std::variant<std::nullptr_t, int64_t, double, std::string>;
+using Params = std::initializer_list<std::pair<int, DbValue>>;
+struct ExecResult {
+    uint64_t affectedRows = 0;
+    uint64_t insertId = 0;
+};
+
 class Database {
 public:
-    /// 打开数据库（自动创建 WAL 模式）
-    explicit Database(const std::string& dbPath);
-    ~Database();
-
-    // 禁止拷贝
-    Database(const Database&) = delete;
-    Database& operator=(const Database&) = delete;
-
-    /// 执行 SQL（无参数）
-    bool execute(const std::string& sql);
-
-    /// 执行 SQL 并自动处理 bind/step/finalize（可变参数版本）
-    /// 支持 int64_t, double, std::string, nullptr
-    bool exec(const std::string& sql,
-              std::initializer_list<std::pair<int, std::string>> params = {});
-
-    /// 查询一行
+    using Params = ::Params;
+    using ExecResult = ::ExecResult;
     struct Row {
-        std::vector<std::string> columns;
-        bool empty() const { return columns.empty(); }
-        std::string get(int i) const {
-            return i < static_cast<int>(columns.size()) ? columns[i] : "";
-        }
-        int64_t getInt(int i) const {
-            return i < static_cast<int>(columns.size()) ? std::stoll(columns[i]) : 0;
-        }
+        std::vector<std::optional<std::string>> columns;
+        bool empty() const noexcept { return columns.empty(); }
+        bool isNull(int i) const noexcept;
+        std::string get(int i) const;
+        int64_t getInt(int i) const;
     };
 
-    /// 查询单行
-    Row queryOne(const std::string& sql,
-                 std::initializer_list<std::pair<int, std::string>> params = {});
+    // 事务独占一个连接租约，直到提交、回滚或析构时才释放。
+    // 只允许移动，不允许复制；同一事务不能被多个线程并发使用。
+    class Transaction {
+    public:
+        ~Transaction() noexcept;
+        Transaction(Transaction&&) noexcept;
+        Transaction& operator=(Transaction&&) noexcept;
+        Transaction(const Transaction&) = delete;
+        Transaction& operator=(const Transaction&) = delete;
+        ExecResult execute(const std::string& sql);
+        ExecResult exec(const std::string& sql, Params params = {});
+        std::vector<Row> query(const std::string& sql, Params params = {});
+        Row queryOne(const std::string& sql, Params params = {});
+        void commit();
+        void rollback();
+        // 关闭事务固定使用的连接，同时释放会话级命名锁。
+        void discard() noexcept;
+    private:
+        struct Impl;
+        explicit Transaction(std::unique_ptr<Impl> impl) noexcept;
+        std::unique_ptr<Impl> impl_;
+        friend class Database;
+    };
 
-    /// 查询多行
-    std::vector<Row> query(const std::string& sql,
-                           std::initializer_list<std::pair<int, std::string>> params = {});
-
-    // ---- 事务 ----
-
-    bool beginTransaction();
-    bool commit();
-    bool rollback();
-
-    // ---- 工具 ----
-
-    int64_t lastInsertId();
-    std::string error() const;
-    bool isOpen() const { return db_ != nullptr; }
-
+    explicit Database(const DatabaseOptions& options);
+    ~Database() noexcept;
+    Database(const Database&) = delete;
+    Database& operator=(const Database&) = delete;
+    ExecResult execute(const std::string& sql);
+    ExecResult exec(const std::string& sql, Params params = {});
+    std::vector<Row> query(const std::string& sql, Params params = {});
+    Row queryOne(const std::string& sql, Params params = {});
+    Transaction transaction();
+    // 唤醒等待者并拒绝新租约，但允许已有事务继续完成。
+    void shutdown() noexcept;
 private:
-    sqlite3* db_ = nullptr;
+    struct Impl;
+    std::shared_ptr<Impl> impl_;
 };
 
 #endif // NETCHAT_DATABASE_H
