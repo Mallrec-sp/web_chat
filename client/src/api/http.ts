@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { AuthResponse, User, MessageRecord } from '../types';
+import type { AuthResponse, UserId, User, MessageRecord } from '../types';
 
 const http = axios.create({
   baseURL: '/api',
@@ -31,7 +31,7 @@ export async function fetchUsers(token: string): Promise<User[]> {
 }
 
 /** 获取消息历史 */
-export async function fetchHistory(token: string, withUserId: number, limit = 50): Promise<MessageRecord[]> {
+export async function fetchHistory(token: string, withUserId: UserId, limit = 50): Promise<MessageRecord[]> {
   const res = await http.get('/messages/history', {
     params: { token, with: withUserId, limit }
   });
@@ -79,22 +79,22 @@ export async function uploadFile(token: string, file: File): Promise<UploadResul
 export default http;
 
 /** 好友相关 API */
-export async function addFriend(token: string, userId: number): Promise<any> {
+export async function addFriend(token: string, userId: UserId): Promise<any> {
   const res = await http.post('/friends/add', { userId }, { params: { token } });
   return res.data;
 }
 
-export async function acceptFriend(token: string, userId: number): Promise<any> {
+export async function acceptFriend(token: string, userId: UserId): Promise<any> {
   const res = await http.post('/friends/accept', { userId }, { params: { token } });
   return res.data;
 }
 
-export async function rejectFriend(token: string, userId: number): Promise<any> {
+export async function rejectFriend(token: string, userId: UserId): Promise<any> {
   const res = await http.post('/friends/reject', { userId }, { params: { token } });
   return res.data;
 }
 
-export async function removeFriend(token: string, userId: number): Promise<any> {
+export async function removeFriend(token: string, userId: UserId): Promise<any> {
   const res = await http.post('/friends/remove', { userId }, { params: { token } });
   return res.data;
 }

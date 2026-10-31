@@ -33,6 +33,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <cctype>
+#include <charconv>
+#include <string_view>
 #include <iomanip>
 #include <sys/stat.h>
 #include <openssl/evp.h>
@@ -93,6 +95,37 @@ static struct FileStore {
 } g_fileStore;
 
 using json = nlohmann::json;
+
+// JSON 边界使用十进制字符串；数据库和会话索引仍使用 int64_t。
+static int64_t parseUserId(std::string_view text) {
+    if (text.empty() || text.front() < '1' || text.front() > '9') return 0;
+    int64_t id = 0;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), id);
+    if (result.ec != std::errc{} || result.ptr != text.data() + text.size() || id <= 0) {
+        return 0;
+    }
+    return id;
+}
+
+static int64_t readUserId(const json& object, const char* key) {
+    if (!object.is_object()) return 0;
+    const auto it = object.find(key);
+    if (it == object.end()) return 0;
+    if (it->is_string()) return parseUserId(it->get_ref<const std::string&>());
+
+    // 仅兼容 JS 安全整数范围内的旧数字请求，拒绝已可能丢失精度的 ID。
+    constexpr int64_t maxSafeInteger = 9007199254740991LL;
+    if (it->is_number_unsigned()) {
+        const auto id = it->get<uint64_t>();
+        return id > 0 && id <= static_cast<uint64_t>(maxSafeInteger)
+            ? static_cast<int64_t>(id) : 0;
+    }
+    if (it->is_number_integer()) {
+        const auto id = it->get<int64_t>();
+        return id > 0 && id <= maxSafeInteger ? id : 0;
+    }
+    return 0;
+}
 
 // ============================================================
 // 静态文件处理
@@ -168,22 +201,41 @@ static HttpResponse serveStaticFile(const std::string& url, const std::string& s
 static void handleWebSocketMessage(
     const std::string& payload,
     int64_t userId,
-    SessionManager& sessionMgr) {
+    SessionManager& sessionMgr,
+    TcpConnection* connection) {
+
+    std::string requestId;
+    auto sendError = [connection, &requestId](const std::string& message) {
+        json error;
+        error["type"] = "error";
+        error["msg"] = message;
+        if (!requestId.empty()) error["id"] = requestId;
+        connection->send(websocket::encodeFrame(ws::kText, error.dump()));
+    };
 
     try {
         auto msg = json::parse(payload);
+        // 在读取其他字段前保存有效的消息 ID，让校验失败也能关联原消息。
+        if (msg.is_object()) {
+            const auto id = msg.find("id");
+            if (id != msg.end() && id->is_string()) {
+                requestId = id->get_ref<const std::string&>();
+            }
+        }
         std::string type = msg.value("type", "");
 
         if (type == "chat") {
-            int64_t to = msg.value("to", (int64_t)0);
+            int64_t to = readUserId(msg, "to");
+            if (to <= 0) { sendError("Invalid recipient userId"); return; }
             std::string text = msg.value("msg", "");
-            if (to <= 0 || text.empty()) return;
+            if (text.empty()) return;
 
             sessionMgr.saveMessage(userId, to, text);
 
             json response;
             response["type"] = "chat";
-            response["from"] = userId;
+            response["from"] = std::to_string(userId);
+            response["to"] = std::to_string(to);
             response["username"] = sessionMgr.getUsername(userId);
             response["msg"] = text;
             // 转发文件附件（如果有）
@@ -225,52 +277,57 @@ static void handleWebSocketMessage(
 
         } else if (type == "read") {
             // 已读回执：userId 已读 fromUser 发来的消息
-            int64_t fromUser = msg.value("from", (int64_t)0);
-            if (fromUser <= 0) return;
+            int64_t fromUser = readUserId(msg, "from");
+            if (fromUser <= 0) { sendError("Invalid sender userId"); return; }
 
             json readMsg;
             readMsg["type"] = "read";
-            readMsg["from"] = userId;
+            readMsg["from"] = std::to_string(userId);
             readMsg["username"] = sessionMgr.getUsername(userId);
 
             // 转发已读通知给消息发送者
             sessionMgr.sendToUser(fromUser, readMsg.dump());
         } else if (type == "friend_add") {
             // 通过 WebSocket 添加好友
-            int64_t targetId = msg.value("userId", (int64_t)0);
-            if (targetId <= 0) return;
+            int64_t targetId = readUserId(msg, "userId");
+            if (targetId <= 0) { sendError("Invalid userId"); return; }
 
             std::string err = sessionMgr.sendFriendRequest(userId, targetId);
             if (err.empty() || err == "accepted") {
                 // 通知目标用户
                 json notify;
                 notify["type"] = "friend_request";
-                notify["from"] = userId;
+                notify["from"] = std::to_string(userId);
                 notify["username"] = sessionMgr.getUsername(userId);
                 sessionMgr.sendToUser(targetId, notify.dump());
 
                 if (err == "accepted") {
                     json accepted;
                     accepted["type"] = "friend_accepted";
-                    accepted["by"] = targetId;
+                    accepted["by"] = std::to_string(targetId);
                     accepted["username"] = sessionMgr.getUsername(targetId);
                     sessionMgr.sendToUser(userId, accepted.dump());
                 }
             }
         } else if (type == "friend_accept") {
             // 通过 WebSocket 接受好友请求
-            int64_t requesterId = msg.value("userId", (int64_t)0);
+            int64_t requesterId = readUserId(msg, "userId");
+            if (requesterId <= 0) { sendError("Invalid userId"); return; }
             if (sessionMgr.acceptFriendRequest(userId, requesterId)) {
                 json notify;
                 notify["type"] = "friend_accepted";
-                notify["by"] = userId;
+                notify["by"] = std::to_string(userId);
                 notify["username"] = sessionMgr.getUsername(userId);
                 sessionMgr.sendToUser(requesterId, notify.dump());
             }
         }
         // ping 不需要回复（WebSocket 协议层的 Pong 由浏览器自动处理）
-    } catch (const json::parse_error&) {
-        LOG_WARNING("Invalid JSON from WebSocket");
+    } catch (const DbError& error) {
+        LOG_ERROR("WebSocket database failure, code=" << error.code() << ", state=" << error.sqlState());
+        sendError("Database unavailable; message was not confirmed");
+    } catch (const json::exception&) {
+        LOG_WARNING("Invalid JSON or field type from WebSocket");
+        sendError("Invalid JSON or field type");
     }
 }
 
@@ -278,7 +335,12 @@ static void handleWebSocketMessage(
 // main
 // ============================================================
 
-int main() {
+static int runServer(int argc, char** argv) {
+    const bool migrate = argc == 2 && std::string(argv[1]) == "--migrate";
+    if (argc > 1 && !migrate) {
+        std::cerr << "Usage: server [--migrate]\n";
+        return 2;
+    }
     LOG_INFO("===========================================");
     LOG_INFO("  NetChat Enterprise Chat Server");
     LOG_INFO("===========================================");
@@ -289,6 +351,16 @@ int main() {
     if (envCfg && envCfg[0]) configPath = envCfg;
     Config config = Config::load(configPath.c_str());
     const auto& srvCfg = config.server_config_;
+
+    // 迁移模式不启动网络服务；运行模式仅校验版本，运行账号无需 DDL 权限。
+    Database db(config.database_config_);
+    if (migrate) return runMigrations(db) ? 0 : 1;
+    if (!verifySchema(db)) {
+        LOG_ERROR("Database schema not ready; run server --migrate with the migration account");
+        return 1;
+    }
+    SessionManager sessionMgr(db);
+    Router router;
 
     // 线程数
     int workerCount = config.workers_;
@@ -339,21 +411,11 @@ int main() {
         LOG_INFO("Worker started: " << loop->name());
     });
 
-    // ---- 数据库和业务对象 ----
-    std::string dbPath = "../data/netchat.db";
-    Database db(dbPath);
-    if (!db.isOpen()) {
-        LOG_ERROR("Failed to open database, exiting");
-        return 1;
-    }
-    if (!runMigrations(db)) {
-        LOG_ERROR("Migration failed, exiting");
-        return 1;
-    }
-    SessionManager sessionMgr(db);
-
-    // ---- Router ----
-    Router router;
+    // 数据库探活只执行 SELECT，失败交给 HTTP 边界返回 503。
+    router.get("/api/health", [&](const HttpRequest&) -> HttpResponse {
+        db.queryOne("SELECT 1");
+        return HttpResponse::ok("{\"status\":\"ok\"}", "application/json");
+    });
 
     // Auth: 注册
     router.post("/api/auth/register", [&](const HttpRequest& req) -> HttpResponse {
@@ -365,7 +427,7 @@ int main() {
             auto result = sessionMgr.registerUser(username, password);
             if (result.success()) {
                 json resp;
-                resp["userId"] = result.userId;
+                resp["userId"] = std::to_string(result.userId);
                 resp["token"] = result.token;
                 return HttpResponse::ok(resp.dump(), "application/json");
             } else {
@@ -373,7 +435,7 @@ int main() {
                 err["error"] = result.error;
                 return HttpResponse::badRequest(err.dump());
             }
-        } catch (...) {
+        } catch (const json::exception&) {
             json err; err["error"] = "Invalid JSON";
             return HttpResponse::badRequest(err.dump());
         }
@@ -389,7 +451,7 @@ int main() {
             auto result = sessionMgr.loginUser(username, password);
             if (result.success()) {
                 json resp;
-                resp["userId"] = result.userId;
+                resp["userId"] = std::to_string(result.userId);
                 resp["token"] = result.token;
                 return HttpResponse::ok(resp.dump(), "application/json");
             } else {
@@ -397,7 +459,7 @@ int main() {
                 err["error"] = result.error;
                 return HttpResponse::badRequest(err.dump());
             }
-        } catch (...) {
+        } catch (const json::exception&) {
             json err; err["error"] = "Invalid JSON";
             return HttpResponse::badRequest(err.dump());
         }
@@ -416,7 +478,7 @@ int main() {
             json resp;
             resp["message"] = "Logged out";
             return HttpResponse::ok(resp.dump(), "application/json");
-        } catch (...) {
+        } catch (const json::exception&) {
             json err; err["error"] = "Invalid JSON";
             return HttpResponse::badRequest(err.dump());
         }
@@ -506,7 +568,7 @@ int main() {
             resp["mime"] = getMimeFromExtension(name);
             return HttpResponse::ok(resp.dump(), "application/json");
 
-        } catch (const json::parse_error&) {
+        } catch (const json::exception&) {
             json err; err["error"] = "Invalid JSON";
             return HttpResponse::badRequest(err.dump());
         }
@@ -568,7 +630,7 @@ int main() {
         if (userId < 0) { json e; e["error"]="Unauthorized"; return HttpResponse::ok(e.dump(),"application/json"); }
         try {
             auto body = json::parse(req.body());
-            int64_t targetId = body.value("userId", (int64_t)0);
+            int64_t targetId = readUserId(body, "userId");
             if (targetId <= 0) { json e; e["error"]="Invalid userId"; return HttpResponse::badRequest(e.dump()); }
             std::string err = sessionMgr.sendFriendRequest(userId, targetId);
             json resp;
@@ -578,14 +640,14 @@ int main() {
                 // 通知目标用户
                 json notify;
                 notify["type"] = "friend_request";
-                notify["from"] = userId;
+                notify["from"] = std::to_string(userId);
                 notify["username"] = sessionMgr.getUsername(userId);
                 sessionMgr.sendToUser(targetId, notify.dump());
                 return HttpResponse::ok(resp.dump(), "application/json");
             }
             resp["error"] = err;
             return HttpResponse::badRequest(resp.dump());
-        } catch (...) {
+        } catch (const json::exception&) {
             json e; e["error"]="Invalid JSON"; return HttpResponse::badRequest(e.dump());
         }
     });
@@ -596,19 +658,20 @@ int main() {
         if (userId < 0) { json e; e["error"]="Unauthorized"; return HttpResponse::ok(e.dump(),"application/json"); }
         try {
             auto body = json::parse(req.body());
-            int64_t requesterId = body.value("userId", (int64_t)0);
+            int64_t requesterId = readUserId(body, "userId");
+            if (requesterId <= 0) { json e; e["error"]="Invalid userId"; return HttpResponse::badRequest(e.dump()); }
             if (sessionMgr.acceptFriendRequest(userId, requesterId)) {
                 json resp; resp["success"] = true;
                 // 通知对方
                 json notify;
                 notify["type"] = "friend_accepted";
-                notify["by"] = userId;
+                notify["by"] = std::to_string(userId);
                 notify["username"] = sessionMgr.getUsername(userId);
                 sessionMgr.sendToUser(requesterId, notify.dump());
                 return HttpResponse::ok(resp.dump(), "application/json");
             }
             json e; e["error"]="No pending request"; return HttpResponse::badRequest(e.dump());
-        } catch (...) {
+        } catch (const json::exception&) {
             json e; e["error"]="Invalid JSON"; return HttpResponse::badRequest(e.dump());
         }
     });
@@ -619,11 +682,14 @@ int main() {
         if (userId < 0) { json e; e["error"]="Unauthorized"; return HttpResponse::ok(e.dump(),"application/json"); }
         try {
             auto body = json::parse(req.body());
-            int64_t requesterId = body.value("userId", (int64_t)0);
-            sessionMgr.rejectFriendRequest(userId, requesterId);
+            int64_t requesterId = readUserId(body, "userId");
+            if (requesterId <= 0) { json e; e["error"]="Invalid userId"; return HttpResponse::badRequest(e.dump()); }
+            if (!sessionMgr.rejectFriendRequest(userId, requesterId)) {
+                return HttpResponse::badRequest("{\"error\":\"No pending request\"}");
+            }
             json resp; resp["success"] = true;
             return HttpResponse::ok(resp.dump(), "application/json");
-        } catch (...) {
+        } catch (const json::exception&) {
             json e; e["error"]="Invalid JSON"; return HttpResponse::badRequest(e.dump());
         }
     });
@@ -634,11 +700,14 @@ int main() {
         if (userId < 0) { json e; e["error"]="Unauthorized"; return HttpResponse::ok(e.dump(),"application/json"); }
         try {
             auto body = json::parse(req.body());
-            int64_t friendId = body.value("userId", (int64_t)0);
-            sessionMgr.removeFriend(userId, friendId);
+            int64_t friendId = readUserId(body, "userId");
+            if (friendId <= 0) { json e; e["error"]="Invalid userId"; return HttpResponse::badRequest(e.dump()); }
+            if (!sessionMgr.removeFriend(userId, friendId)) {
+                return HttpResponse::badRequest("{\"error\":\"Friend relationship not found\"}");
+            }
             json resp; resp["success"] = true;
             return HttpResponse::ok(resp.dump(), "application/json");
-        } catch (...) {
+        } catch (const json::exception&) {
             json e; e["error"]="Invalid JSON"; return HttpResponse::badRequest(e.dump());
         }
     });
@@ -650,7 +719,7 @@ int main() {
         auto friends = sessionMgr.getFriends(userId);
         json list = json::array();
         for (const auto& f : friends) {
-            json j; j["userId"]=f.userId; j["username"]=f.username; j["online"]=f.online;
+            json j; j["userId"]=std::to_string(f.userId); j["username"]=f.username; j["online"]=f.online;
             list.push_back(j);
         }
         return HttpResponse::ok(list.dump(), "application/json");
@@ -663,7 +732,7 @@ int main() {
         auto requests = sessionMgr.getPendingRequests(userId);
         json list = json::array();
         for (const auto& r : requests) {
-            json j; j["userId"]=r.userId; j["username"]=r.username;
+            json j; j["userId"]=std::to_string(r.userId); j["username"]=r.username;
             list.push_back(j);
         }
         return HttpResponse::ok(list.dump(), "application/json");
@@ -682,7 +751,7 @@ int main() {
         json list = json::array();
         for (const auto& u : users) {
             json j;
-            j["userId"] = u.userId;
+            j["userId"] = std::to_string(u.userId);
             j["username"] = u.username;
             j["online"] = u.online;
             list.push_back(j);
@@ -699,17 +768,27 @@ int main() {
             return HttpResponse::ok(err.dump(), "application/json");
         }
 
-        int64_t with = 0;
-        try { with = std::stoll(getQueryParam(req.url(), "with")); } catch (...) {}
+        int64_t with = parseUserId(getQueryParam(req.url(), "with"));
+        if (with <= 0) {
+            json err; err["error"] = "Invalid with userId";
+            return HttpResponse::badRequest(err.dump());
+        }
         int limit = 50;
-        try { limit = std::stoi(getQueryParam(req.url(), "limit")); } catch (...) {}
+        const auto limitText = getQueryParam(req.url(), "limit");
+        if (!limitText.empty()) {
+            const auto parsedLimit = parseUserId(limitText);
+            if (parsedLimit <= 0 || parsedLimit > 500) {
+                return HttpResponse::badRequest("{\"error\":\"Invalid history limit\"}");
+            }
+            limit = static_cast<int>(parsedLimit);
+        }
 
         auto msgs = sessionMgr.getHistory(userId, with, limit);
         json jarray = json::array();
         for (const auto& m : msgs) {
             json j;
-            j["fromUserId"] = m.fromUserId;
-            j["toUserId"] = m.toUserId;
+            j["fromUserId"] = std::to_string(m.fromUserId);
+            j["toUserId"] = std::to_string(m.toUserId);
             j["content"] = m.content;
             j["created_at"] = m.timestamp;
             jarray.push_back(j);
@@ -740,6 +819,7 @@ int main() {
         HttpParser* parser = conn->getHttpParser();
         if (!parser) return;
 
+        try {
         while (parser->parse(buffer)) {
             const auto& req = parser->request();
             const std::string& url = req.url();
@@ -789,11 +869,15 @@ int main() {
                     while (wsParser->parse(buf)) {
                         const auto& frame = wsParser->frame();
                         if (frame.opcode == ws::kText) {
-                            handleWebSocketMessage(frame.payload, userId, sessionMgr);
+                            handleWebSocketMessage(frame.payload, userId, sessionMgr, c);
                         } else if (frame.opcode == ws::kPing) {
                             c->send(websocket::encodeFrame(ws::kPong, ""));
                         } else if (frame.opcode == ws::kClose) {
-                            sessionMgr.userOffline(userId);
+                            try {
+                                sessionMgr.userOffline(userId, c);
+                            } catch (const DbError& error) {
+                                LOG_ERROR("Offline notification failed, code=" << error.code());
+                            }
                             c->send(websocket::encodeCloseFrame(ws::kNormalClosure, "bye"));
                             c->shutdown();
                         }
@@ -802,8 +886,12 @@ int main() {
                 });
 
                 // 设置 WebSocket 断开回调（处理 TCP 异常断开场景）
-                conn->setWsCloseCallback([userId, &sessionMgr]() {
-                    sessionMgr.userOffline(userId);
+                conn->setWsCloseCallback([userId, connection = conn.get(), &sessionMgr]() {
+                    try {
+                        sessionMgr.userOffline(userId, connection);
+                    } catch (const DbError& error) {
+                        LOG_ERROR("Offline notification failed, code=" << error.code());
+                    }
                 });
 
                 // 注册在线
@@ -814,7 +902,7 @@ int main() {
             }
 
             // ---- 普通 HTTP 请求 ----
-            LOG_INFO(req.methodString() << " " << url);
+            LOG_INFO(req.methodString() << " " << url.substr(0, url.find('?')));
 
             // 先尝试 API 路由
             HttpResponse response;
@@ -833,6 +921,17 @@ int main() {
                 return;
             }
             parser->reset();
+        }
+        } catch (const DbError& error) {
+            LOG_ERROR("HTTP database failure, code=" << error.code() << ", state=" << error.sqlState());
+            if (conn->isWebSocketMode()) {
+                conn->send(websocket::encodeFrame(ws::kText,
+                    "{\"type\":\"error\",\"msg\":\"Database unavailable\"}"));
+            } else {
+                conn->send(HttpResponse::serviceUnavailable().toString());
+            }
+            conn->shutdown();
+            return;
         }
 
         if (parser->state() == HttpParser::State::kError) {
@@ -861,12 +960,21 @@ int main() {
 
     // ---- 清理 ----
     LOG_INFO("Stopping workers...");
-    auto* pool = server.threadPool();
-    if (pool) {
-        for (auto* loop : pool->getAllLoops()) {
-            loop->quit();
-        }
-    }
+    db.shutdown();
+    server.stop();
     LOG_INFO("Shutdown complete.");
     return 0;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return runServer(argc, argv);
+    } catch (const DbError& error) {
+        LOG_ERROR("Database startup failure, code=" << error.code() << ", state=" << error.sqlState());
+    } catch (const json::exception&) {
+        LOG_ERROR("Invalid configuration JSON or field type");
+    } catch (const std::exception& error) {
+        LOG_ERROR("Server startup/runtime failure: " << error.what());
+    }
+    return 1;
 }

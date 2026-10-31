@@ -10,6 +10,7 @@
 #include <string>
 #include <map>
 #include <atomic>
+#include <mutex>
 
 class SslContext;
 
@@ -53,6 +54,9 @@ public:
     /// 启动服务器（开始监听）
     void start();
 
+    /// 在主线程停止接入，join 工作线程后释放连接。
+    void stop();
+
     // ---- 多线程设置（必须在 start() 之前调用） ----
 
     /// 设置工作线程数（0 = 单线程模式，与之前兼容）
@@ -89,7 +93,7 @@ public:
     EventLoopThreadPool* threadPool() const { return threadPool_.get(); }
 
     /// 获取当前连接数
-    int connectionCount() const { return connections_.size(); }
+    int connectionCount() const { return numConnected_.load(); }
 
 private:
     void newConnection(int connfd, const InetAddress& peerAddr);
@@ -106,6 +110,7 @@ private:
 
     /// 所有活跃连接 <连接名, TcpConnection>
     std::map<std::string, std::shared_ptr<TcpConnection>> connections_;
+    std::mutex connectionsMutex_;
 
     int nextConnId_ = 1;
     std::atomic<int> numConnected_{0};   ///< 当前连接数

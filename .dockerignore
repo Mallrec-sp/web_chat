@@ -1,3 +1,12 @@
+# Local secrets and runtime files must never enter a build context
+.env
+.env.*
+*.pem
+*.key
+server/cert/
+server/uploads/
+server/build*/
+
 # Git
 .git/
 .gitignore

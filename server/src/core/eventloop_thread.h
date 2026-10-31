@@ -36,6 +36,10 @@ public:
     /// 启动线程并返回该线程中的 EventLoop 指针
     EventLoop* startLoop();
 
+    /// 请求退出与等待结束分开，便于线程池先唤醒所有 worker 再逐个 join。
+    void requestStop();
+    void join();
+
     /// 获取线程名称
     const std::string& name() const { return name_; }
 

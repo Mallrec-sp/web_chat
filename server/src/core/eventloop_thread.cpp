@@ -8,13 +8,18 @@ EventLoopThread::EventLoopThread(const std::string& name, ThreadInitCallback cb)
 }
 
 EventLoopThread::~EventLoopThread() {
+    requestStop();
+    join();
+}
+
+void EventLoopThread::requestStop() {
+    std::lock_guard<std::mutex> lock(mutex_);
     exiting_ = true;
-    if (loop_ != nullptr) {
-        loop_->quit();
-    }
-    if (thread_.joinable()) {
-        thread_.join();
-    }
+    if (loop_ != nullptr) loop_->quit();
+}
+
+void EventLoopThread::join() {
+    if (thread_.joinable()) thread_.join();
 }
 
 EventLoop* EventLoopThread::startLoop() {

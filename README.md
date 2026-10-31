@@ -1,7 +1,7 @@
 # NetChat — Reactor 模型 WebChat 学习项目
 
 > 从零实现一个支持多用户实时聊天的 Web 聊天应用。
-> 服务端全部自研，不依赖 Nginx/Redis 等外部组件。
+> 网络层、HTTP 与 WebSocket 服务端自研；持久化使用 MySQL 8.4，不依赖 Nginx/Redis。
 
 ## 项目简介
 
@@ -18,28 +18,41 @@ NetChat 是一个**学习项目**，目标是深入理解：
 
 ## 快速开始
 
-```bash
-# 1. 构建服务端
-cd server && mkdir -p build && cd build
-cmake .. && make -j$(nproc)
-
-# 2. 构建前端（可选，dist 目录已含预构建产物）
-cd client && npm install && npm run build
-
-# 3. 启动
-cd server/build
-mkdir -p ../data           # 数据库目录
-./server
-
-# 4. 打开浏览器
-# http://localhost:8080
-```
-
-### Docker 部署
+需要 Docker Engine + Compose v2，以及 Node.js 22+（更新前端和运行测试使用）。以下从项目根目录执行：
 
 ```bash
-docker compose up -d
+# 创建本地随机密码，不覆盖已有 .env，也不打印密码
+node scripts/init-env.mjs
+
+# 修改前端后需要重新生成静态产物
+npm --prefix client ci
+npm --prefix client run build
+
+# 启动独立 MySQL → 运行一次迁移 → 启动聊天服务
+# 运行账号只有 DML 权限，不使用 root、不自动建表
+docker compose up -d --build
 ```
+
+浏览器访问 **http://localhost:8081**。若原服务仍占用 8081，可临时使用 `NETCHAT_HTTP_PORT=8082 docker compose up -d --build`，在 8082 验证新服务，不必停止或清理旧服务。
+
+开发前端可另开终端运行 `npm --prefix client run dev`，访问 `http://localhost:5173`；其代理默认连接 8081，使用其他后端端口时需同步调整 `client/vite.config.ts`。
+
+**存储已切换为 MySQL，全新数据库需要重新注册。** 不再使用旧 SQLite 数据库，也不提供旧数据自动导入。连接池、预编译语句、事务及数据库错误处理见 [MySQL 部署与开发说明](docs/mysql.md)。
+
+### 回归测试
+
+```bash
+npm --prefix client test
+node server/tests/run-mysql-tests.mjs
+```
+
+前者测试前端 store 和列表渲染；后者需要 Docker 权限，为每次测试创建独立的随机项目、MySQL 库和临时密码，执行迁移、原生数据库测试以及真实双账号 HTTP/WebSocket 测试，最后只清理本轮测试资源，不操作开发库。
+
+**用户 ID 协议：** HTTP/WebSocket 中的 `userId`、`from`、`to`、`by`、`fromUserId`、`toUserId` 均使用十进制字符串；C++ 使用 `int64_t`，MySQL 使用 `BIGINT`。不要在 JavaScript 中将它们转成 `Number`。
+
+### 外部 MySQL / 本机构建
+
+生产或独立数据库使用 `compose.external.yml`，默认启用 `VERIFY_IDENTITY` 并要求数据库 CA；不会启动本地 MySQL。本机 CMake 构建需要官方 MySQL 客户端开发库。完整命令、环境变量及权限说明见 [docs/mysql.md](docs/mysql.md)。
 
 ---
 
@@ -76,7 +89,7 @@ docker compose up -d
 │  │  ├── Token 验证                               │    │
 │  │  ├── 在线用户管理                             │    │
 │  │  ├── 消息路由 (点对点 + 广播)                 │    │
-│  │  ├── 消息持久化 (SQLite3)                     │    │
+│  │  ├── 消息持久化 (MySQL 8.4)                     │    │
 │  │  └── 好友系统                                 │    │
 │  └──────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────┘
@@ -275,7 +288,9 @@ void TcpConnection::send(const char* data, size_t len) {
 
 > **学到的东西**：One Loop Per Thread + runInLoop 跨线程转发，是 C++ 网络编程中"无锁并发"的经典范式。每个线程只写自己的数据结构，跨线程通信通过消息传递而非共享内存加锁。
 
-### 第六阶段：业务层 —— SessionManager + SQLite3
+### 第六阶段：业务层 —— SessionManager + MySQL
+
+最初使用 SQLite，现已替换为 MySQL：业务复用 `Database` 封装，通过 RAII 连接租约和固定连接事务管理并发访问。数据库调用仍是同步的，不代表 Reactor 已具备异步 SQL 能力。
 
 **关键词**：`SessionManager` · `Token 认证` · `消息路由`
 
@@ -285,7 +300,7 @@ void TcpConnection::send(const char* data, size_t len) {
 | Token 认证 | 每次 WebSocket 连接时验证 URL 中的 token |
 | 在线管理 | map<userId, weak_ptr<TcpConnection>> |
 | 消息路由 | `sendToUser(userId, msg)` → 查找连接 → 编码帧 → 发送 |
-| 消息持久化 | SQLite3 INSERT/SELECT |
+| 消息持久化 | MySQL 预编译 INSERT/SELECT；持久化失败不确认发送 |
 | 好友系统 | friendships 表双向关系 |
 
 **Token 认证流程**：
@@ -402,7 +417,7 @@ if (wsMode_ && wsFrameHandler_) {
 | 网络框架 | Reactor (epoll, LT 模式) | 事件驱动 I/O |
 | 协议 | HTTP/1.1 + WebSocket (RFC 6455) | 通信协议 |
 | SSL | OpenSSL | 传输加密 |
-| 数据库 | SQLite3 | 持久化 |
+| 数据库 | MySQL 8.4 + 官方 C API | 连接池、事务与持久化 |
 | 构建 | CMake + Makefile | C++ 构建 |
 | 前端 | React 18 + TypeScript | UI |
 | 状态管理 | Zustand | 前端状态 |
@@ -441,7 +456,7 @@ if (wsMode_ && wsFrameHandler_) {
 │   │   ├── service/
 │   │   │   └── session_mgr.cpp/h # 会话管理和业务逻辑
 │   │   ├── db/
-│   │   │   ├── database.cpp/h    # SQLite3 封装
+│   │   │   ├── database.cpp/h    # MySQL 预编译、连接池和 RAII 事务
 │   │   │   └── migrations.cpp/h  # 数据库迁移
 │   │   └── utils/
 │   │       ├── auth.cpp/h        # 认证工具

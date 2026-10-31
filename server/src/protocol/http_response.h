@@ -30,7 +30,8 @@ public:
         k403       = 403,
         k404       = 404,
         k405       = 405,
-        k500       = 500
+        k500       = 500,
+        k503       = 503
     };
 
     HttpResponse() { reset(); }
@@ -125,6 +126,7 @@ public:
             case k404: return "Not Found";
             case k405: return "Method Not Allowed";
             case k500: return "Internal Server Error";
+            case k503: return "Service Unavailable";
             default:   return "Unknown";
         }
     }
@@ -165,6 +167,16 @@ public:
         resp.setStatusMessage(statusMessage(k500));
         resp.setContentType("text/plain");
         resp.setBody(body);
+        resp.setKeepAlive(false);
+        return resp;
+    }
+
+    static HttpResponse serviceUnavailable() {
+        HttpResponse resp;
+        resp.setStatusCode(k503);
+        resp.setStatusMessage(statusMessage(k503));
+        resp.setContentType("application/json");
+        resp.setBody("{\"error\":\"Database unavailable\"}");
         resp.setKeepAlive(false);
         return resp;
     }

@@ -4,8 +4,18 @@ project(server VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# ===== 源文件列表 =====
+find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MYSQL REQUIRED IMPORTED_TARGET mysqlclient)
+
+# 数据库实现只编译一次，服务和原生集成测试共用。
+add_library(netchat_db STATIC src/db/database.cpp)
+target_include_directories(netchat_db PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(netchat_db PUBLIC PkgConfig::MYSQL Threads::Threads)
+
 set(SOURCES
     src/main.cpp
     src/utils/log.cpp
@@ -26,45 +36,29 @@ set(SOURCES
     src/core/ssl_context.cpp
     src/protocol/websocket.cpp
     src/service/session_mgr.cpp
-    src/db/database.cpp
     src/db/migrations.cpp
 )
 
-# ===== 可执行目标 =====
 add_executable(server ${SOURCES})
-
-# ===== 链接 pthread =====
-find_package(Threads REQUIRED)
-target_link_libraries(server PRIVATE Threads::Threads)
-
-# ===== 链接 OpenSSL (SHA1, Base64) =====
-find_package(OpenSSL REQUIRED)
-target_link_libraries(server PRIVATE OpenSSL::Crypto OpenSSL::SSL)
-
-# ===== 链接 SQLite3 =====
-find_package(SQLite3 REQUIRED)
-target_link_libraries(server PRIVATE SQLite::SQLite3)
-
-# ===== 头文件路径 =====
-target_include_directories(server PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party>
-    $<INSTALL_INTERFACE:include>
+target_link_libraries(server PRIVATE netchat_db OpenSSL::Crypto OpenSSL::SSL)
+target_include_directories(server PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 
-# ===== 编译选项 =====
-target_compile_options(server PRIVATE
-    -Wall -Wextra -Wpedantic
-    $<$<CONFIG:RELEASE>:-O3 -march=native -DNDEBUG>
-    $<$<CONFIG:DEBUG>:-g -O0 -fsanitize=address -fno-omit-frame-pointer>
-)
+foreach(target server netchat_db)
+    target_compile_options(${target} PRIVATE
+        -Wall -Wextra -Wpedantic
+        $<$<CONFIG:Release>:-O3;-DNDEBUG>
+        $<$<CONFIG:Debug>:-g;-O0;-fsanitize=address;-fno-omit-frame-pointer>
+    )
+    target_link_options(${target} PUBLIC $<$<CONFIG:Debug>:-fsanitize=address>)
+endforeach()
 
-target_link_options(server PRIVATE
-    $<$<CONFIG:DEBUG>:-fsanitize=address>
-)
-
-# ===== 第三方库 (后续 Phase 按需开启) =====
-# find_package(SQLite3 REQUIRED)
-# target_link_libraries(netchat_server PRIVATE SQLite::SQLite)
-# find_package(OpenSSL REQUIRED)
-# target_link_libraries(netchat_server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(database_test tests/database_test.cpp)
+    target_link_libraries(database_test PRIVATE netchat_db)
+    add_test(NAME database_test COMMAND database_test)
+    set_tests_properties(database_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+endif()

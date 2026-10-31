@@ -1,6 +1,7 @@
 #ifndef NETCHAT_SESSION_MGR_H
 #define NETCHAT_SESSION_MGR_H
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <map>
@@ -16,13 +17,13 @@ class Database;
  * SessionManager — WebSocket 会话管理和聊天业务逻辑。
  *
  * 职责：
- *   1. 用户注册和登录（SQLite3 持久化）
+ *   1. 用户注册和登录（MySQL 持久化）
  *   2. 会话 token 验证
  *   3. WebSocket 连接管理（上线/下线/广播）
  *   4. 消息路由（点对点发送）
  *   5. 在线用户列表
  *
- * 数据持久化：用户数据、Token、消息全部存储在 SQLite3 中。
+ * 数据持久化：用户数据、Token、消息全部存储在 MySQL 中。
  * 运行时状态（WebSocket 连接）保持在内存中。
  */
 class SessionManager {
@@ -57,7 +58,7 @@ public:
     // ---- WebSocket 会话管理 ----
 
     void userOnline(int64_t userId, const std::shared_ptr<TcpConnection>& conn);
-    void userOffline(int64_t userId);
+    void userOffline(int64_t userId, const TcpConnection* connection);
     std::vector<int64_t> getOnlineUsers() const;
     std::vector<std::string> getOnlineUsernames() const;
     std::shared_ptr<TcpConnection> getConnection(int64_t userId) const;

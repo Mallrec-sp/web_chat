@@ -1,26 +1,40 @@
 import { create } from 'zustand';
-import type { User, Session, MessageRecord, Conversation, IncomingMessage, MessageStatus } from '../types';
+import type { UserId, User, Session, MessageRecord, Conversation, IncomingMessage, MessageStatus } from '../types';
 import { login as apiLogin, register as apiRegister, logout as apiLogout, fetchUsers as apiFetchUsers, fetchHistory as apiFetchHistory } from '../api/http';
 import { wsClient } from '../api/ws';
+
+let unsubscribeWs: (() => void) | undefined;
+let connectedToken: string | null = null;
+let onlineUserIds: Set<UserId> | null = null;
+let usersRequestId = 0;
+
+// 保留原有顺序和离线用户，按 ID 更新或新增，不产生重复条目。
+function mergeUsers(current: User[], incoming: User[]): User[] {
+  const users = new Map(current.map(user => [user.userId, user]));
+  for (const user of incoming) {
+    users.set(user.userId, { ...users.get(user.userId), ...user });
+  }
+  return [...users.values()];
+}
 
 interface ChatState {
   session: Session | null;
   token: string | null;
   users: User[];
-  conversations: Map<number, Conversation>;
-  activeChat: number | null;
+  conversations: Map<UserId, Conversation>;
+  activeChat: UserId | null;
   loadingUsers: boolean;
   loadingHistory: boolean;
-  friendRequests: { userId: number; username: string }[];
+  friendRequests: { userId: UserId; username: string }[];
   friendRequestsCount: number;
 
   login: (username: string, password: string) => Promise<string | null>;
   register: (username: string, password: string) => Promise<string | null>;
   logout: () => void;
-  selectUser: (userId: number) => void;
-  sendMessage: (to: number, msg: string) => void;
+  selectUser: (userId: UserId) => void;
+  sendMessage: (to: UserId, msg: string) => void;
   loadUsers: () => Promise<void>;
-  loadHistory: (userId: number) => Promise<void>;
+  loadHistory: (userId: UserId) => Promise<void>;
 
   _initWs: () => void;
   _handleWsMessage: (msg: IncomingMessage) => void;
@@ -66,9 +80,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   logout: () => {
     const token = get().token;
     if (token) apiLogout(token).catch(() => {});
+    unsubscribeWs?.();
+    unsubscribeWs = undefined;
+    connectedToken = null;
+    onlineUserIds = null;
+    usersRequestId++;
     wsClient.disconnect();
     localStorage.removeItem('netchat_session');
-    set({ session: null, token: null, users: [], conversations: new Map(), activeChat: null });
+    set({ session: null, token: null, users: [], conversations: new Map(), activeChat: null, loadingUsers: false });
   },
 
   selectUser: async (userId) => {
@@ -126,14 +145,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadUsers: async () => {
     const token = get().token;
     if (!token) return;
+    const requestId = ++usersRequestId;
+    const before = new Map(get().users.map(user => [user.userId, user]));
     try {
       set({ loadingUsers: true });
       const users = await apiFetchUsers(token);
-      set({ users });
+      if (get().token !== token || requestId !== usersRequestId) return;
+      const current = new Map(get().users.map(user => [user.userId, user]));
+      const merged = mergeUsers(get().users, users).map(user => {
+        // HTTP 返回期间可能已收到新事件，不能用旧快照覆盖它们。
+        const updated = current.get(user.userId);
+        const latest = updated && updated !== before.get(user.userId) ? updated : user;
+        return onlineUserIds
+          ? { ...latest, online: onlineUserIds.has(user.userId) }
+          : latest;
+      });
+      set({ users: merged });
     } catch (e) {
       console.error('Failed to load users:', e);
     } finally {
-      set({ loadingUsers: false });
+      if (get().token === token && requestId === usersRequestId) {
+        set({ loadingUsers: false });
+      }
     }
   },
 
@@ -167,12 +200,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   _initWs: () => {
     const { token } = get();
-    if (!token) return;
+    if (!token || (connectedToken === token && unsubscribeWs)) return;
+    unsubscribeWs?.();
     wsClient.disconnect();
-    wsClient.connect(token);
-    wsClient.onMessage((msg) => {
+    unsubscribeWs = wsClient.onMessage((msg) => {
       get()._handleWsMessage(msg);
     });
+    connectedToken = token;
+    onlineUserIds = null;
+    wsClient.connect(token);
   },
 
   _handleWsMessage: (msg) => {
@@ -182,26 +218,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     switch (msg.type) {
       // online_list 来自 WebSocket (已经广播), users 来自 HTTP API
       case 'online_list': {
-        // 把在线状态合并到已有 users 中
-        const onlineIds = new Set(msg.users.map((u: any) => u.userId));
-        const merged = state.users.map(u => ({
-          ...u,
-          online: onlineIds.has(u.userId),
+        const onlineIds = new Set(msg.users.map(user => user.userId));
+        onlineUserIds = onlineIds;
+        const merged = mergeUsers(state.users, msg.users).map(user => ({
+          ...user,
+          online: onlineIds.has(user.userId),
         }));
         set({ users: merged });
         break;
       }
 
       case 'user_online': {
+        onlineUserIds?.add(msg.userId);
         set({
-          users: state.users.map(u =>
-            u.userId === msg.userId ? { ...u, online: true } : u
-          ),
+          users: mergeUsers(state.users, [{ userId: msg.userId, username: msg.username, online: true }]),
         });
         break;
       }
 
       case 'user_offline': {
+        onlineUserIds?.delete(msg.userId);
         set({
           users: state.users.map(u =>
             u.userId === msg.userId ? { ...u, online: false } : u
@@ -214,12 +250,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const session = state.session;
         if (!session) break;
 
-        // 检查是否是我们自己发出的消息（回声确认）
+        // 自身回显必须按收件人路由，不能依赖此刻打开的会话。
         const isSelf = msg.from === session.userId;
-        let status: MessageStatus | undefined = isSelf ? 'sent' : undefined;
+        const convId = isSelf ? msg.to : msg.from;
+        const existing = convs.get(convId);
+        const index = msg.id ? (existing?.messages.findIndex(m =>
+          m.msgId === msg.id && m.fromUserId === msg.from
+        ) ?? -1) : -1;
+        const previous = index >= 0 ? existing!.messages[index] : undefined;
+        const status = isSelf
+          ? (previous?.status === 'delivered' || previous?.status === 'read' ? previous.status : 'sent')
+          : undefined;
 
         const record: MessageRecord = {
-          id: msg.id || `${msg.time}-${msg.from}-${Math.random()}`,
+          id: previous?.id || msg.id || `${msg.time}-${msg.from}-${Math.random()}`,
           msgId: msg.id,
           fromUserId: msg.from,
           username: msg.username,
@@ -227,26 +271,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
           time: msg.time,
           isSelf,
           status,
+          file: msg.file,
         };
 
-        const convId = msg.from === session.userId ? (state.activeChat || msg.from) : msg.from;
-
-        const existing = convs.get(convId);
-        if (existing) {
-          convs.set(convId, {
-            ...existing,
-            messages: [...existing.messages, record],
-            unread: convId !== state.activeChat ? existing.unread + 1 : existing.unread,
-          });
+        const messages = existing ? [...existing.messages] : [];
+        if (index >= 0) {
+          messages[index] = record;
         } else {
-          convs.set(convId, {
-            userId: convId,
-            username: msg.username,
-            messages: [record],
-            unread: convId !== state.activeChat ? 1 : 0,
-          });
+          messages.push(record);
         }
-        set({ conversations: convs });
+        const unread = !isSelf && index < 0 && convId !== state.activeChat ? 1 : 0;
+        convs.set(convId, {
+          userId: convId,
+          username: existing?.username || (isSelf
+            ? state.users.find(u => u.userId === convId)?.username || ''
+            : msg.username),
+          messages,
+          unread: (existing?.unread || 0) + unread,
+        });
+        // 即使错过上线通知，来信也必须有可点击的用户入口。
+        let users = state.users;
+        if (!isSelf && !users.some(user => user.userId === msg.from)) {
+          onlineUserIds?.add(msg.from);
+          users = mergeUsers(users, [{ userId: msg.from, username: msg.username, online: true }]);
+        }
+        set({ conversations: convs, users });
         break;
       }
 
@@ -255,7 +304,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const convs2 = new Map(state.conversations);
         for (const [convId, conv] of convs2) {
           const updated = conv.messages.map(m =>
-            m.msgId === msg.id ? { ...m, status: 'delivered' as MessageStatus } : m
+            m.isSelf && m.msgId === msg.id && m.status !== 'read'
+              ? { ...m, status: 'delivered' as MessageStatus } : m
           );
           if (updated !== conv.messages) {
             convs2.set(convId, { ...conv, messages: updated });

@@ -8,11 +8,11 @@ export default defineConfig({
     // 开发模式下 API 和 WS 请求代理到 C++ 后端
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: 'http://localhost:8081',
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:8080',
+        target: 'ws://localhost:8081',
         ws: true,
       },
     },

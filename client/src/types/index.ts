@@ -3,15 +3,18 @@
 // ============================================
 
 // ---- 用户 ----
+// 用户 ID 超过 JavaScript 安全整数范围，网络与前端始终使用字符串。
+export type UserId = string;
+
 export interface User {
-  userId: number;
+  userId: UserId;
   username: string;
   online?: boolean;
 }
 
 // ---- API 响应 ----
 export interface AuthResponse {
-  userId?: number;
+  userId?: UserId;
   token?: string;
   error?: string;
 }
@@ -24,7 +27,7 @@ export interface ApiError {
 // 客户端 → 服务端
 export interface ChatMessage {
   type: 'chat';
-  to: number;
+  to: UserId;
   msg: string;
   id?: string;       // 客户端消息 ID（用于回执跟踪）
 }
@@ -35,17 +38,19 @@ export interface PingMessage {
 
 export interface ReadReceipt {
   type: 'read';
-  from: number;
+  from: UserId;
 }
 
 // 服务端 → 客户端
 export interface ChatReceived {
   type: 'chat';
-  from: number;
+  from: UserId;
+  to: UserId;
   username: string;
   msg: string;
   time: number;
   id?: string;        // 消息 ID（用于回执匹配）
+  file?: FileInfo;
 }
 
 export interface DeliveredReceipt {
@@ -56,7 +61,7 @@ export interface DeliveredReceipt {
 
 export interface ReadReceiptReceived {
   type: 'read';
-  from: number;
+  from: UserId;
   username: string;
 }
 
@@ -67,18 +72,19 @@ export interface OnlineListMessage {
 
 export interface UserOnlineMessage {
   type: 'user_online';
-  userId: number;
+  userId: UserId;
   username: string;
 }
 
 export interface UserOfflineMessage {
   type: 'user_offline';
-  userId: number;
+  userId: UserId;
 }
 
 export interface ErrorMessage {
   type: 'error';
   msg: string;
+  id?: string;
 }
 
 export type OutgoingMessage = ChatMessage | PingMessage | ReadReceipt;
@@ -87,19 +93,19 @@ export type IncomingMessage = ChatReceived | DeliveredReceipt | ReadReceiptRecei
 // ---- 好友系统 ----
 export interface FriendRequestReceived {
   type: 'friend_request';
-  from: number;
+  from: UserId;
   username: string;
 }
 
 export interface FriendAcceptedReceived {
   type: 'friend_accepted';
-  by: number;
+  by: UserId;
   username: string;
 }
 
 // ---- 会话存储 ----
 export interface Session {
-  userId: number;
+  userId: UserId;
   username: string;
   token: string;
 }
@@ -117,7 +123,7 @@ export interface FileInfo {
 
 export interface MessageRecord {
   id: string;
-  fromUserId: number;
+  fromUserId: UserId;
   username: string;
   content: string;
   time: number;
@@ -129,7 +135,7 @@ export interface MessageRecord {
 
 // ---- 聊天会话 ----
 export interface Conversation {
-  userId: number;
+  userId: UserId;
   username: string;
   messages: MessageRecord[];
   unread: number;

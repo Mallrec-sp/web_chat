@@ -1,0 +1,92 @@
+# 仅由 server/tests/run-mysql-tests.mjs 驱动：独立随机项目、随机库、独立数据卷，无宿主端口。
+x-test-database: &test-database
+  NETCHAT_DB_HOST: mysql
+  NETCHAT_DB_PORT: "3306"
+  NETCHAT_DB_NAME: ${NETCHAT_TEST_DATABASE:?Use the isolated test runner}
+  NETCHAT_DB_POOL_SIZE: "4"
+  NETCHAT_DB_SSL_MODE: REQUIRED
+  NETCHAT_DB_CONNECT_TIMEOUT: "5"
+  NETCHAT_DB_READ_TIMEOUT: "5"
+  NETCHAT_DB_WRITE_TIMEOUT: "5"
+  NETCHAT_DB_ACQUIRE_TIMEOUT_MS: "3000"
+
+services:
+  mysql:
+    image: mysql:8.4
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_bin
+      - --max-allowed-packet=16777216
+      - --innodb-lock-wait-timeout=5
+      - --require-secure-transport=ON
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Use the isolated test runner}
+      MYSQL_DATABASE: ${NETCHAT_TEST_DATABASE:?Use the isolated test runner}
+      NETCHAT_APP_PASSWORD: ${NETCHAT_APP_PASSWORD:?Use the isolated test runner}
+      NETCHAT_MIGRATION_PASSWORD: ${NETCHAT_MIGRATION_PASSWORD:?Use the isolated test runner}
+      NETCHAT_TEST_READONLY_PASSWORD: ${NETCHAT_TEST_READONLY_PASSWORD:?Use the isolated test runner}
+    volumes:
+      - mysql-test-data:/var/lib/mysql
+      - ./docker/mysql/init-users.sh:/docker-entrypoint-initdb.d/10-users.sh:ro
+      - ./docker/mysql/init-test-users.sh:/docker-entrypoint-initdb.d/20-test-users.sh:ro
+    healthcheck:
+      # 使用 TCP，避免官方 entrypoint 的临时 socket-only 初始化服务提前被判健康。
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$NETCHAT_TEST_READONLY_PASSWORD\" mysql --protocol=tcp --host=127.0.0.1 --ssl-mode=REQUIRED --user=netchat_test_readonly --database=\"$$MYSQL_DATABASE\" --execute='SELECT 1' >/dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+    restart: "no"
+
+  migrate:
+    build:
+      context: .
+      target: production
+    command: ["--migrate"]
+    environment:
+      <<: *test-database
+      NETCHAT_DB_USER: netchat_migrator
+      NETCHAT_DB_PASSWORD: ${NETCHAT_MIGRATION_PASSWORD:?Use the isolated test runner}
+    restart: "no"
+
+  ddl-denied:
+    build:
+      context: .
+      target: production
+    command: ["--migrate"]
+    environment:
+      <<: *test-database
+      NETCHAT_DB_USER: netchat_app
+      NETCHAT_DB_PASSWORD: ${NETCHAT_APP_PASSWORD:?Use the isolated test runner}
+    restart: "no"
+
+  database-test:
+    build:
+      context: .
+      target: db-test
+    environment:
+      MYSQL_TEST_HOST: mysql
+      MYSQL_TEST_PORT: "3306"
+      MYSQL_TEST_DATABASE: ${NETCHAT_TEST_DATABASE:?Use the isolated test runner}
+      MYSQL_TEST_USER: netchat_migrator
+      MYSQL_TEST_PASSWORD: ${NETCHAT_MIGRATION_PASSWORD:?Use the isolated test runner}
+      MYSQL_TEST_SSL_MODE: REQUIRED
+    restart: "no"
+
+  protocol-test:
+    build:
+      context: .
+      target: protocol-test
+    environment:
+      <<: *test-database
+      NETCHAT_DB_USER: netchat_app
+      NETCHAT_DB_PASSWORD: ${NETCHAT_APP_PASSWORD:?Use the isolated test runner}
+      NETCHAT_TEST_READONLY_USER: netchat_test_readonly
+      NETCHAT_TEST_READONLY_PASSWORD: ${NETCHAT_TEST_READONLY_PASSWORD:?Use the isolated test runner}
+      NETCHAT_TEST_BINARY: /app/server
+      NETCHAT_STATIC_DIR: /app/dist
+    init: true
+    restart: "no"
+
+volumes:
+  mysql-test-data:

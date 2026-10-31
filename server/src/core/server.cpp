@@ -23,13 +23,17 @@ Server::Server(EventLoop* loop, const InetAddress& listenAddr, const std::string
 }
 
 Server::~Server() {
-    LOG_DEBUG("Server destructing: " << name_);
+    stop();
+}
 
-    // 在优雅关闭时，worker EventLoops 可能已经被销毁，
-    // 所以不能调用 connectDestroyed()（会尝试 removeChannel 在已关闭的 epoll fd 上）。
-    // 直接释放所有连接，由 ~TcpConnection 和 ~Socket 关闭真实 fd。
-    // 内核会在 close(epollFd_) 时自动清理所有注册。
+void Server::stop() {
+    loop_->assertInLoopThread();
+    acceptor_.reset();
+    // 必须先 join；不能在 worker 仍访问连接和数据库时释放这些对象。
+    threadPool_->stop();
+    std::lock_guard<std::mutex> lock(connectionsMutex_);
     connections_.clear();
+    numConnected_.store(0);
 }
 
 void Server::start() {
@@ -82,16 +86,18 @@ void Server::newConnection(int connfd, const InetAddress& peerAddr) {
             removeConnection(c);
         });
 
-        // 保存并建立连接
-        connections_[connName] = conn;
+        // 连接对象属于各自 worker，但连接索引由多个 worker 共享。
+        {
+            std::lock_guard<std::mutex> lock(connectionsMutex_);
+            connections_[connName] = conn;
+            numConnected_.store(connections_.size());
+        }
         conn->connectEstablished();
 
         // SSL 握手（如果配置了 SSL）
         if (sslCtx_) {
             conn->startSsl(*sslCtx_);
         }
-
-        numConnected_.store(connections_.size());
 
         if (connectionCallback_) {
             connectionCallback_(conn);
@@ -108,10 +114,13 @@ void Server::removeConnection(const std::shared_ptr<TcpConnection>& conn) {
 }
 
 void Server::removeConnectionInLoop(const std::shared_ptr<TcpConnection>& conn) {
-    size_t n = connections_.erase(conn->name());
+    size_t n;
+    {
+        std::lock_guard<std::mutex> lock(connectionsMutex_);
+        n = connections_.erase(conn->name());
+        numConnected_.store(connections_.size());
+    }
     conn->connectDestroyed();
-
-    numConnected_.store(connections_.size());
 
     if (n == 1 && connectionCallback_) {
         connectionCallback_(conn);

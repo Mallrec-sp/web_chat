@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <functional>
+#include <string>
 
 class EventLoop;
 class EventLoopThread;
@@ -43,6 +44,9 @@ public:
 
     /// 启动线程池，创建所有 EventLoopThread
     void start(const ThreadInitCallback& cb = ThreadInitCallback());
+
+    /// 退出并 join 全部 worker，可重复调用。
+    void stop();
 
     /// 获取下一个 EventLoop（round-robin 负载均衡）
     EventLoop* getNextLoop();
